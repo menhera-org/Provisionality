@@ -72,13 +72,59 @@ export class KeyValueStorageImplementation {
         super();
         const state = {
             values: new Map,
+            observers: new Map,
         };
         storageStates.set(this, state);
     }
 
     has(key) {
         const state = storageStates.get(this);
-        if (!state) throw new TypeError('')
+        return!!state.values.has(String(key));
+    }
+
+    set(key, value) {
+        const state = storageStates.get(this);
+        const stringKey = String(key);
+        state.values.set(stringKey, JSON.stringify(value));
+        if (!state.observers.has(stringKey)) {
+            return;
+        }
+        for (const observer of state.observers.get(stringKey)) {
+            observer(this.get(stringKey));
+        }
+    }
+
+    get(key) {
+        const state = storageStates.get(this);
+        return JSON.parse(state.values.get(String(key)));
+    }
+
+    addObserver(key, callback) {
+        const stringKey = String(key);
+        if ('function' != typeof callback) {
+            throw new TypeError('Not a function');
+        }
+        const state = storageStates.get(this);
+        if (!state.observers.has(stringKey)) {
+            state.observers.set(stringKey, new Set);
+        }
+        state.observers.get(stringKey).add(callback);
+    }
+
+    removeObserver(key, callback) {
+        const stringKey = String(key);
+        if ('function' != typeof callback) {
+            throw new TypeError('Not a function');
+        }
+        const state = storageStates.get(this);
+        if (!state.observers.has(stringKey)) {
+            return;
+        }
+        const set = state.observers.get(stringKey);
+        set.delete(callback);
+        if (!set.size) {
+            state.observers.delete(stringKey);
+        }
     }
 }
 
