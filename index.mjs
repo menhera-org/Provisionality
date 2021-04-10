@@ -20,6 +20,9 @@
  */
 
 
+import './es-first-aid.js';
+
+
 const STORAGE_KEY_SESSION_ID = 'menhera.session_id';
 const STORAGE_KEY_CLIENT_ID = 'menhera.client_id';
 const STORAGE_KEY_BROADCAST = 'menhera.broadcast';
@@ -38,24 +41,6 @@ const callAsync = (callback, ... args) => {
     .catch(e => console.error(e));
 };
 
-const randomUuid = () => {
-    const bytes = new Uint8Array(16);
-    crypto.getRandomValues(bytes);
-    bytes[6] = bytes[6] & 0x0f ^ 0x40;
-    bytes[8] = bytes[8] & 0x3f ^ 0x80;
-    const hex = Array.prototype.map.call(
-        bytes,
-        byte => (byte | 0x100).toString(0x10).slice(-2)
-    ).join('');
-    return [
-        hex.substr(0, 8),
-        hex.substr(8, 4),
-        hex.substr(12, 4),
-        hex.substr(16, 4),
-        hex.substr(20, 12),
-    ].join('-');
-};
-
 
 let clientIdCache = null;
 
@@ -72,7 +57,7 @@ const getClientId = () => {
         return clientId;
     } catch (e) {}
     
-    const clientId = randomUuid();
+    const clientId = firstAid.getRandomUuid();
     clientIdCache = clientId;
     try {
         localStorage.setItem(STORAGE_KEY_CLIENT_ID, clientId);
@@ -96,7 +81,7 @@ const getSessionId = () => {
         return sessionId;
     } catch (e) {}
 
-    const sessionId = randomUuid();
+    const sessionId = firstAid.getRandomUuid();
     sessionIdCache = sessionId;
     try {
         sessionStorage.setItem(STORAGE_KEY_SESSION_ID, sessionId);
