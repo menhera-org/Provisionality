@@ -20,6 +20,13 @@
  */
 
 
+const STORAGE_KEY_SESSION_ID = 'menhera.session_id';
+const STORAGE_KEY_CLIENT_ID = 'menhera.client_id';
+const STORAGE_KEY_BROADCAST = 'menhera.broadcast';
+const SESSION_ID_GLOBAL = '00000000-0000-0000-0000-000000000000'; // Means client-global.
+const STORAGE_PREFIX_SESSION = 'menhera.storage.by_session';
+
+
 /**
  * 
  * @param callback {function}
@@ -49,114 +56,295 @@ const randomUuid = () => {
     ].join('-');
 };
 
-const isConstructor = f => {
+
+let clientIdCache = null;
+
+/**
+ * 
+ * @returns {string}
+ */
+const getClientId = () => {
+    if (clientIdCache) return clientIdCache;
     try {
-        Reflect.construct(String, [], f);
-        return true;
-    } catch (e) {
-        return false;
+        const clientId = localStorage.getItem(STORAGE_KEY_CLIENT_ID);
+        if (!clientId) throw void 0;
+        clientIdCache = clientId;
+        return clientId;
+    } catch (e) {}
+    
+    const clientId = randomUuid();
+    clientIdCache = clientId;
+    try {
+        localStorage.setItem(STORAGE_KEY_CLIENT_ID, clientId);
+    } finally {
+        return clientId;
     }
 };
 
-const statesByClass = new WeakMap;
-const internalStates = {};
-export class InternalStateStore {
-    constructor(constructor) {
-        const internalState = Object.create(null);
-    }
-}
+let sessionIdCache = null;
 
-const storageStates = new WeakMap;
-export class KeyValueStorageImplementation {
-    constructor() {
+/**
+ * 
+ * @returns {string}
+ */
+const getSessionId = () => {
+    if (sessionIdCache) return sessionIdCache;
+    try {
+        const sessionId = sessionStorage.getItem(STORAGE_KEY_SESSION_ID);
+        if (!sessionId) throw void 0;
+        sessionIdCache = sessionId;
+        return sessionId;
+    } catch (e) {}
+
+    const sessionId = randomUuid();
+    sessionIdCache = sessionId;
+    try {
+        sessionStorage.setItem(STORAGE_KEY_SESSION_ID, sessionId);
+    } finally {
+        return sessionId;
+    }
+};
+
+class CompatBroadcastChannel extends EventTarget {
+    constructor(channelName) {
         super();
-        const state = {
-            values: new Map,
-            observers: new Map,
-        };
-        storageStates.set(this, state);
+
+        if ('string' != typeof channelName) {
+            throw new TypeError('Invalid channel name');
+        }
+
+        this.channelName = String(channelName).trim().toLowerCase();
+        if (!this.channelName) {
+            throw new TypeError('Empty channel name');
+        }
+
+        window.addEventListener('storage', ev => {
+            if (null === ev.key) {
+                console.log('The storage was cleared');
+                return;
+            }
+            if (STORAGE_KEY_BROADCAST != ev.key) {
+                return;
+            }
+            if (!ev.newValue) {
+                return;
+            }
+
+            const {channelName, data} = JSON.parse(ev.newValue);
+            if (channelName != this.channelName) {
+                return;
+            }
+            const messageEvent = new MessageEvent('message', {
+                data,
+                origin: document.origin,
+            });
+            this.dispatchEvent(messageEvent);
+        });
     }
 
-    has(key) {
-        const state = storageStates.get(this);
-        return!!state.values.has(String(key));
-    }
-
-    set(key, value) {
-        const state = storageStates.get(this);
-        const stringKey = String(key);
-        state.values.set(stringKey, JSON.stringify(value));
-        if (!state.observers.has(stringKey)) {
-            return;
-        }
-        for (const observer of state.observers.get(stringKey)) {
-            observer(this.get(stringKey));
-        }
-    }
-
-    get(key) {
-        const state = storageStates.get(this);
-        return JSON.parse(state.values.get(String(key)));
-    }
-
-    addObserver(key, callback) {
-        const stringKey = String(key);
-        if ('function' != typeof callback) {
-            throw new TypeError('Not a function');
-        }
-        const state = storageStates.get(this);
-        if (!state.observers.has(stringKey)) {
-            state.observers.set(stringKey, new Set);
-        }
-        state.observers.get(stringKey).add(callback);
-    }
-
-    removeObserver(key, callback) {
-        const stringKey = String(key);
-        if ('function' != typeof callback) {
-            throw new TypeError('Not a function');
-        }
-        const state = storageStates.get(this);
-        if (!state.observers.has(stringKey)) {
-            return;
-        }
-        const set = state.observers.get(stringKey);
-        set.delete(callback);
-        if (!set.size) {
-            state.observers.delete(stringKey);
+    postMessage(data) {
+        const value = JSON.stringify({
+            channelName: this.channelName,
+            data,
+        });
+        try {
+            localStorage.setItem(STORAGE_KEY_BROADCAST, value);
+        } finally {
+            const {data} = JSON.parse(value);
+            const messageEvent = new MessageEvent('message', {
+                data,
+                origin: document.origin,
+            });
+            this.dispatchEvent(messageEvent);
         }
     }
 }
 
-const topicStates = new WeakMap;
-export class Topic {
-    constructor() {
-        const listeners = new Set;
-        topicStates.set(this, listeners);
+export class StorageImplementation {
+    constructor(sessionId) {
+        super();
+        this.sessionId = String(sessionId || getSessionId()).toLowerCase();
+        this.storageKey = `${STORAGE_PREFIX_SESSION}.${this.sessionId}`;
+        this.cachedValues = {};
+        this.storage = this.sessionId == SESSION_ID_GLOBAL ? localStorage : sessionStorage;
+        this.broadcastChannel = new CompatBroadcastChannel(this.storageKey);
+        this.observersMap = new Map;
+    }
+
+    getAll() {
+        try {
+            const json = this.storage.getItem(this.storageKey);
+            if (!json) throw void 0;
+            return JSON.parse(json) || {};
+        } catch (e) {
+            return this.cachedValues;
+        }
     }
 
     /**
      * 
-     * @param listener {(data: *) => Promise<void>}
+     * @param values {object?}
+     */
+    save(values) {
+        const json = JSON.stringify(values || this.cachedValues);
+        try {
+            this.storage.setItem(this.storageKey, json);
+        } finally {
+            this.cachedValues = JSON.parse(json);
+        }
+    }
+
+    has(key) {
+        const stringKey = String(key).trim().toLowerCase();
+        const values = this.getAll();
+        return Object.getOwnPropertyNames(values).includes(stringKey);
+    }
+
+    get(key) {
+        if (!this.has(key)) {
+            return null;
+        }
+        const stringKey = String(key).trim().toLowerCase();
+        const values = this.getAll();
+        return values[stringKey];
+    }
+
+    set(key, value) {
+        const stringKey = String(key).trim().toLowerCase();
+        const values = this.getAll();
+        if (!value) {
+            delete values[stringKey];
+        } else {
+            values[stringKey] = value;
+        }
+        this.save(values);
+        this.broadcastChannel.postMessage({key: stringKey});
+    }
+
+    addObserver(key, callback) {
+        const stringKey = String(key).toLowerCase();
+        if ('function' != typeof callback) {
+            throw new TypeError('Not a function');
+        }
+        const listener = ({data}) => {
+            const {key} = data;
+            if (stringKey != key) return;
+            callback(this.get(stringKey));
+        };
+        if (!this.observersMap.has(stringKey)) {
+            this.observersMap.set(stringKey, new WeakMap);
+        }
+        this.observersMap.get(stringKey).set(callback, listener);
+        this.broadcastChannel.addEventListener('message', listener);
+        callAsync(() => callback(this.get(stringKey)));
+    }
+
+    removeObserver(key, callback) {
+        const stringKey = String(key).toLowerCase();
+        if ('function' != typeof callback) {
+            throw new TypeError('Not a function');
+        }
+        if (!this.observersMap.has(stringKey)) {
+            return;
+        }
+        if (!this.observersMap.get(stringKey).has(callback)) {
+            return;
+        }
+        const listener = this.observersMap.get(stringKey).get(callback);
+        this.broadcastChannel.removeEventListener('message', listener);
+    }
+}
+
+const storageEventTarget = new class extends EventTarget {
+    constructor() {
+        super();
+        window.addEventListener('storage', ev => {
+            if (null === ev.key) {
+                console.log('The storage was cleared');
+                return;
+            }
+            if (!ev.newValue) {
+                return;
+            }
+            this.dispatchEvent(ev);
+        });
+    }
+
+    postMessage(data, targetSession) {
+        const sessionId = getSessionId();
+        const clientId = getClientId();
+        const metadata = {
+            clientId,
+            sessionId,
+            createdTime: +new Date,
+            origin: document.origin,
+        };
+        const value = JSON.stringify({metadata, data});
+        storageEventTarget.setItem(this.storageKey, value);
+    }
+    setItem(key, text) {
+        const value = String(text);
+        try {
+            localStorage.setItem(key, text);
+        } catch (e) {}
+        const ev = new StorageEvent('storage');
+        ev.initStorageEvent('storage', false, false, key, null, value, location.href, localStorage);
+        this.dispatchEvent(ev);
+    }
+};
+
+/**
+ * @typedef {({clientId: string, sessionId: string, topicName: string, createdTime: number, origin: string})} TopicMetadata
+ */
+
+const topicBroadcasts = new CompatBroadcastChannel('menhera.topics');
+
+const topicListenerMap = new WeakMap;
+export class Topic {
+    /**
+     * 
+     * @param topicName {string}
+     * @param sessionId {string?} Client-broadcast if omitted
+     */
+    constructor(topicName, sessionId) {
+        if ('string' != typeof topicName) {
+            throw new TypeError('Invalid topic name');
+        }
+        this.topicName = String(topicName).trim().toLowerCase();
+        if (!this.topicName) {
+            throw new TypeError('Empty topic name');
+        }
+        this.sessionId = String(sessionId || SESSION_ID_GLOBAL);
+    }
+
+    /**
+     * 
+     * @param listener {(data: *, metadata: TopicMetadata) => Promise<void>}
      */
     addListener(listener) {
         if ('function' != typeof listener) {
             throw new TypeError('Not a function');
         }
-        const listeners = topicStates.get(this);
-        listeners.add(listener);
+        const realListener = (ev) => {
+            const {sessionId, topicName, metadata, data} = ev.data;
+            if (sessionId != this.sessionId) return;
+            if (topicName != this.topicName) return;
+            listener(data, metadata);
+        };
+        topicListenerMap.set(listener, realListener);
+        topicBroadcasts.addEventListener('message', realListener);
     }
 
     /**
      * 
-     * @param listener {(data: *) => Promise<void>}
+     * @param listener {(data: *, metadata: TopicMetadata) => Promise<void>}
      */
     removeListener(listener) {
         if ('function' != typeof listener) {
             throw new TypeError('Not a function');
         }
-        const listeners = topicStates.get(this);
-        listeners.delete(listener);
+        if (!topicListenerMap.has(listener)) return;
+        topicBroadcasts.removeEventListener('message', topicListenerMap.get(listener));
     }
 
     /**
@@ -164,227 +352,98 @@ export class Topic {
      * @param data {*}
      */
     dispatchMessage(data) {
-        const listeners = topicStates.get(this);
-        for (const listener of listeners) {
-            callAsync(listener, data);
-        }
-    }
-}
-
-const propertyStates = new WeakMap;
-export class Property {
-    /**
-     * 
-     * @param value {*}
-     */
-    constructor(value) {
-        const propertyState = {
-            jsonValue: JSON.stringify(value),
+        const sessionId = getSessionId();
+        const clientId = getClientId();
+        const metadata = {
+            clientId,
+            sessionId,
+            topicName: this.topicName,
+            createdTime: +new Date,
+            origin: document.origin,
         };
-        propertyStates.set(this, propertyState);
+        topicBroadcasts.postMessage({
+            sessionId: this.sessionId,
+            topicName: this.topicName,
+            metadata,
+            data,
+        });
     }
-
-    /**
-     * 
-     * @returns {*}
-     */
-    getValue() {
-        const propertyState = propertyStates.get(this);
-        return JSON.parse(propertyState.jsonValue);
-    }
-
-    /**
-     * 
-     * @param observer {(value: *) => Promise<void>}
-     */
-    addObserver(observer) {
-        if ('function' != typeof observer) {
-            throw new TypeError('Not a function');
-        }
-        callAsync(observer, this.getValue());
-    }
-
-    /**
-     * 
-     * @param observer {(value: *) => Promise<void>}
-     */
-    removeObserver(observer) {}
 }
 
-const stateValuesMap = new WeakMap;
+const stateImplementationMap = new WeakMap;
 export class State {
     /**
-     * Creates a State object.
-     * @param isImmutable {boolean}
+     * 
+     * @param implementation {StorageImplementation?}
      */
-    constructor(init) {
-        init = init || {};
-        const {isImmutable, values, prefix} = init;
-        Reflect.defineProperty(this, 'isImmutable', {value: !!isImmutable});
-        const state = {
-            propertyValues: values || Object.create(null),
-            propertyObservers: Object.create(null),
-            prefix: String(prefix || ''),
-        };
-        stateValuesMap.set(this, state);
+    constructor(implementation) {
+        if (!implementation) {
+            implementation = new StorageImplementation;
+        }
+        stateImplementationMap.set(this, implementation);
     }
 
-    /**
-     * Get a Property by its name.
-     * @param propertyName {string}
-     * @returns {Property} Property with the given propertyName.
-     */
-    getProperty(propertyName) {
-        const {propertyValues, propertyObservers, prefix} = stateValuesMap.get(this);
-        propertyName = prefix + String(propertyName);
-        return new class extends Property {
-            constructor() {
-                super(void 0);
-            }
+    get(propertyName) {
+        const implementation = stateImplementationMap.get(this);
+        return implementation.get(propertyName);
+    }
 
-            getValue() {
-                if (propertyName in propertyValues) {
-                    return JSON.parse(propertyValues[propertyName]);
-                }
-                return void 0;
-            }
+    addPropertyObserver(propertyName, callback) {
+        const implementation = stateImplementationMap.get(this);
+        implementation.addObserver(propertyName, callback);
+    }
 
-            addObserver(observer) {
-                if ('function' != typeof observer) {
-                    throw new TypeError('Not a function');
-                }
-                if (!propertyObservers[propertyName]) {
-                    propertyObservers[propertyName] = new Set;
-                }
-                propertyObservers[propertyName].add(observer);
-            }
-
-            removeObserver(observer) {
-                if ('function' != typeof observer) {
-                    throw new TypeError('Not a function');
-                }
-                if (!propertyObservers[propertyName]) {
-                    return;
-                }
-                if (propertyObservers[propertyName].has(observer)) {
-                    propertyObservers[propertyName].delete(observer);
-                }
-                if (propertyObservers[propertyName].size < 1) {
-                    delete propertyObservers[propertyName];
-                }
-            }
-        };
+    removePropertyObserver(propertyName, callback) {
+        const implementation = stateImplementationMap.get(this);
+        implementation.removeObserver(propertyName, callback);
     }
 
     /**
      * Add a Reflector from a Topic.
      * @param topic {Topic}
-     * @param topicReflector {(data: *) => Map<string, *>}
+     * @param topicReflector {(data: *, metadata: TopicMetadata) => Promise<Map<string, *>>}
      */
     addTopicReflector(topic, topicReflector) {
-        if (this.isImmutable) {
-            throw new TypeError('Cannot modify immutable State');
-        }
         if ('function' != typeof topicReflector) {
             throw new TypeError('Not a function');
         }
-        const {propertyValues, propertyObservers, prefix} = stateValuesMap.get(this);
-        topic.addListener(data => {
-            const change = new Map(topicReflector(data) || []);
+        const implementation = stateImplementationMap.get(this);
+        topic.addListener(async (data, metadata) => {
+            const change = new Map((await topicReflector(data, metadata)) || []);
             for (const [propertyName, newValue] of change) {
-                if ('undefined' == typeof newValue) {
-                    delete propertyValues[prefix + propertyName];
-                } else {
-                    propertyValues[prefix + propertyName] = newValue;
-                }
-                const observers = propertyObservers[prefix + propertyName];
-                if (observers) {
-                    for (const observer of observers) {
-                        callAsync(observer, newValue);
-                    }
-                }
-            }
-        });
-    }
-
-    /**
-     * Add a Reflector from a Property.
-     * @param property {Property}
-     * @param propertyReflector {(value: *) => Map<string, *>}
-     */
-    addPropertyReflector(property, propertyReflector) {
-        if (this.isImmutable) {
-            throw new TypeError('Cannot modify immutable State');
-        }
-        if ('function' != typeof propertyReflector) {
-            throw new TypeError('Not a function');
-        }
-        const {propertyValues, propertyObservers, prefix} = stateValuesMap.get(this);
-        property.addObserver(value => {
-            const change = new Map(propertyReflector(value) || []);
-            for (const [propertyName, newValue] of change) {
-                if ('undefined' == typeof newValue) {
-                    delete propertyValues[prefix + propertyName];
-                } else {
-                    propertyValues[prefix + propertyName] = newValue;
-                }
-                const observers = propertyObservers[prefix + propertyName];
-                if (observers) {
-                    for (const observer of observers) {
-                        callAsync(observer, newValue);
-                    }
-                }
+                implementation.set(propertyName, newValue);
             }
         });
     }
 }
 
 export class Session {
-    constructor(appId) {
-        appId = String(appId);
-        Reflect.defineProperty(this, 'appId', {value: appId});
-        const id = '';
-        const state = new class extends State {
-            //
-        };
-        Reflect.defineProperty(this, 'id', {value: id});
-        Reflect.defineProperty(this, 'state', {value: state});
+    constructor(sessionId) {
+        this.id = String(sessionId || getSessionId());
+        const storageImplementation = new StorageImplementation(this.id);
+        this.state = new State(storageImplementation);
     }
 
     getTopic(topicName) {
-        //
+        return new Topic(topicName, this.id);
     }
 }
 
 export class Client {
-    constructor(appId) {
-        //
-        appId = String(appId);
-        const id = '';
-        const state = new class extends State {
-            //
-        };
-        Reflect.defineProperty(this, 'id', {value: id});
-        Reflect.defineProperty(this, 'state', {value: state});
+    constructor() {
+        this.id = getClientId();
+        const storageImplementation = new StorageImplementation(SESSION_ID_GLOBAL);
+        this.state = new State(storageImplementation);
     }
 
     getTopic(topicName) {
-        //
+        return new Topic(topicName, SESSION_ID_GLOBAL);
     }
 }
 
-export class App {
-    constructor(id, state) {
-        //
-        const appId = String(id);
-        const appState = new class extends State {
-            //
-        };
-        const session = new Session;
-        const client = new Client;
-        Reflect.defineProperty(this, 'id', {value: appId});
-        Reflect.defineProperty(this, 'state', {value: appState});
-        Reflect.defineProperty(this, 'session', {value: session});
-        Reflect.defineProperty(this, 'client', {value: client});
-    }
-}
+globalThis.menhera = {
+    sessionId: getSessionId(),
+    clientId: getClientId(),
+    session: new Session,
+    client: new Client,
+};
